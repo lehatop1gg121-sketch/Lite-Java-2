@@ -76,31 +76,28 @@ function renderTask() {
     const task = currentTopic.tasks[currentTaskIndex];
     if (!task) return;
 
-    const titleEl = document.getElementById('task-title');
-    const descEl = document.getElementById('task-description');
-    const theoryEl = document.getElementById('theory-content');
+    const titleEl   = document.getElementById('task-title');
+    const descEl    = document.getElementById('task-description');
+    const theoryEl  = document.getElementById('theory-content');
+    const feedbackEl = document.getElementById('task-feedback');
     
     const isExam = currentTopic.type === 'independent' || currentTopic.type === 'control';
     
-    // Теория отрендеривается в зеленую панель
+    // Теория → зелёная панель
     if (theoryEl) {
-        if (isExam) {
-            theoryEl.innerHTML = currentTopic.content || '<p>Здесь нет теории. Удачи на самостоятельной работе!</p>';
-        } else {
-            theoryEl.innerHTML = currentTopic.content || '';
-        }
+        theoryEl.innerHTML = isExam
+            ? (currentTopic.content || '<p>Здесь нет теории. Удачи на самостоятельной работе!</p>')
+            : (currentTopic.content || '');
     }
     
-    // Само задание - в красную панель
-    titleEl.innerText = `${currentTopic.title} - Задание ${currentTaskIndex + 1}`;
-    descEl.innerHTML = `<p style="font-size: 1.05rem; line-height: 1.6;">${task.desc}</p>`;
+    // Задание → красная панель
+    if (titleEl)    titleEl.innerText   = `${currentTopic.title} - Задание ${currentTaskIndex + 1}`;
+    if (descEl)     descEl.innerHTML    = `<p style="font-size: 1.05rem; line-height: 1.6;">${task.desc}</p>`;
+    if (feedbackEl) feedbackEl.innerHTML = '';
 
     updateTaskDots();
-    document.getElementById('task-feedback').innerText = "";
-    document.getElementById('captured-output').innerText = "Ready to execute...";
-    document.getElementById('captured-output').removeAttribute('data-mode');
 
-    // Сбросить редактор и файлы для нового задания
+    // Сбросить редактор для нового задания
     if (typeof window.resetEditorToDefault === 'function') {
         window.resetEditorToDefault();
     }
