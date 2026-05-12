@@ -3,14 +3,10 @@
  *
  * АЛГОРИТМ:
  * 1. Отправляем код на Piston API → реальная компиляция и выполнение
- * 2. Если ошибка компиляции → ПРОВАЛ (показываем ошибку)
+ * 2. Если ошибка компиляции → ПРОВАЛ (показываем ошибку компилятора)
  * 3. Если вывод совпадает с expected → проверяем codeContains
  *    (ключевые слова в комментариях и строках НЕ считаются)
  * 4. Только если ВСЁ совпало → SUCCESS
- *
- * Если интернет недоступен → задание НЕ засчитывается.
- * Обойти проверку "написав ключевые слова" невозможно — код обязан компилироваться
- * и давать правильный вывод.
  */
 
 window.SmartChecker = {
@@ -63,59 +59,51 @@ window.SmartChecker = {
 
     /**
      * Проверяет наличие паттерна ТОЛЬКО в реальном коде
-     * (не в комментариях и не внутри строк).
-     * Поддерживает regex-паттерны из roadmap.json.
+     * (не в комментариях, не внутри строк).
      */
     containsPattern(rawCode, pattern) {
         const cleanCode = this.stripCommentsAndStrings(rawCode);
-
         try {
-            // JSON-паттерны типа "\\+" → создаём реальный regex
             const regex = new RegExp(pattern, 'i');
             return regex.test(cleanCode);
         } catch (e) {
-            // Невалидный regex — plain search
             const plain = pattern.replace(/\\\\/g, '\\').replace(/\\/g, '');
             return cleanCode.includes(plain);
         }
     },
 
     /**
-     * Нормализует вывод для сравнения:
-     * trim, collapse whitespace, lowercase.
+     * Нормализует вывод: trim, lowercase.
      */
     normalizeOutput(str) {
-        return str
-            .replace(/\r\n/g, '\n')
-            .replace(/\r/g, '\n')
-            .trim();
+        return str.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
     },
 
     /**
-     * Гибкое сравнение вывода программы с ожидаемым.
-     * Проверяет точное совпадение, вхождение и компактное совпадение.
+     * Гибкое сравнение вывода с ожидаемым.
      */
     outputMatches(actual, expected) {
-        const nActual  = this.normalizeOutput(actual);
+        const nActual   = this.normalizeOutput(actual);
         const nExpected = this.normalizeOutput(expected);
-
-        // Компактные версии (без пробелов) для числовых ответов вроде "1 2 3" vs "123"
         const cActual   = nActual.replace(/\s+/g, '');
         const cExpected = nExpected.replace(/\s+/g, '');
 
         return (
-            nActual === nExpected              ||  // точное совпадение
-            nActual.toLowerCase().includes(nExpected.toLowerCase()) ||  // вхождение (case-insensitive)
-            cActual === cExpected                  // компактное совпадение
+            nActual === nExpected ||
+            nActual.toLowerCase().includes(nExpected.toLowerCase()) ||
+            cActual === cExpected
         );
     },
 
     /**
-     * Получить версию Java из Piston API.
+     * Получить версию Java из Piston API (с таймаутом).
      */
     async getJavaVersion() {
         try {
-            const res = await fetch('https://emkc.org/api/v2/piston/runtimes');
+            const controller = new AbortController();
+            const tid = setTimeout(() => controller.abort(), 5000);
+            const res = await fetch('https://emkc.org/api/v2/piston/runtimes', { signal: controller.signal });
+            clearTimeout(tid);
             if (!res.ok) return '15.0.2';
             const runtimes = await res.json();
             const javaRuntime = runtimes.find(r => r.language === 'java');
@@ -127,21 +115,16 @@ window.SmartChecker = {
 
     /**
      * Главная функция проверки решения.
-     *
-     * @param {Object} task — объект задачи из roadmap.json { expected, codeContains }
-     * @param {Object} filesObj — { 'Main.java': '...', 'Car.java': '...' }
-     * @returns {Object} { success: bool, message: string, detail: string }
      */
     async check(task, filesObj) {
         const result = { success: false, message: '', detail: '' };
         const allCode = Object.values(filesObj).join('\n');
 
-        // ── ЭТАП 1: Запуск через Piston API ─────────────────────────────
-        let pistonAvailable = true;
-        let compileError    = false;
-        let runtimeError    = false;
-        let programOutput   = '';
+        let compileError  = false;
+        let runtimeError  = false;
+        let programOutput = '';
 
+        // ── ЭТАП 1: Запуск через Piston API ─────────────────────────────
         try {
             const pistonFiles = Object.keys(filesObj).map(name => ({
                 name,
@@ -150,56 +133,71 @@ window.SmartChecker = {
 
             const javaVersion = await this.getJavaVersion();
 
-            const response = await fetch('https://emkc.org/api/v2/piston/execute', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    language: 'java',
-                    version: javaVersion,
-                    files: pistonFiles
-                })
-            });
+            // Таймаут 15 секунд
+            const controller = new AbortController();
+            const timeoutId  = setTimeout(() => controller.abort(), 15000);
+
+            let response;
+            try {
+                response = await fetch('https://emkc.org/api/v2/piston/execute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    signal: controller.signal,
+                    body: JSON.stringify({
+                        language: 'java',
+                        version: javaVersion,
+                        files: pistonFiles
+                    })
+                });
+            } finally {
+                clearTimeout(timeoutId);
+            }
 
             if (response.status === 429) {
-                throw new Error('rate_limit');
+                result.message = '⚠️ Сервер компилятора перегружен';
+                result.detail  = 'Подождите 10–15 секунд и попробуйте снова.';
+                return result;
             }
+
             if (!response.ok) {
-                throw new Error(`http_${response.status}`);
+                result.message = `⚠️ Ошибка сервера компилятора (код ${response.status})`;
+                result.detail  = 'Попробуйте повторить через несколько секунд.';
+                return result;
             }
 
             const data = await response.json();
 
-            // Ошибка компиляции
             if (data.compile && data.compile.code !== 0) {
-                compileError = true;
+                compileError  = true;
                 programOutput = (data.compile.output || data.compile.stderr || '').trim();
             } else if (data.run) {
                 if (data.run.code !== 0 && data.run.stderr) {
-                    runtimeError = true;
+                    runtimeError  = true;
                     programOutput = (data.run.output || data.run.stderr || '').trim();
                 } else {
                     programOutput = (data.run.output || '').trim();
                 }
             }
 
-        } catch (networkError) {
-            pistonAvailable = false;
+        } catch (err) {
+            // Выводим реальную ошибку в консоль для отладки
+            console.error('[SmartChecker] Piston fetch error:', err.name, err.message);
 
-            if (networkError.message === 'rate_limit') {
-                result.message = '⚠️ Сервер перегружен. Подождите несколько секунд и попробуйте снова.';
-                result.detail  = 'Лимит запросов к компилятору исчерпан.';
-                return result;
+            if (err.name === 'AbortError') {
+                result.message = '⚠️ Сервер компилятора не ответил вовремя (таймаут 15 с)';
+                result.detail  = 'Попробуйте ещё раз. Если проблема повторяется — Piston API временно недоступен.';
+            } else if (err.message && err.message.includes('Failed to fetch')) {
+                result.message = '⚠️ Не удалось подключиться к компилятору';
+                result.detail  = 'Возможные причины:\n• Piston API (emkc.org) временно недоступен\n• Запрос заблокирован браузером или антивирусом\n\nОткройте консоль браузера (F12) для подробностей.';
+            } else {
+                result.message = '⚠️ Ошибка при обращении к компилятору';
+                result.detail  = `${err.name}: ${err.message}\n\nОткройте консоль (F12) для подробностей.`;
             }
-
-            // Нет интернета — не принимаем решение без компиляции
-            result.message = '⚠️ Нет соединения с сервером компиляции';
-            result.detail  = 'Для проверки решения необходим интернет. Убедитесь в подключении и попробуйте ещё раз.';
             return result;
         }
 
-        // ── ЭТАП 2: Проверка результата компиляции ──────────────────────
+        // ── ЭТАП 2: Ошибка компиляции ───────────────────────────────────
         if (compileError) {
-            // Берём первые 8 строк ошибки — они самые информативные
             const errorLines = programOutput
                 .split('\n')
                 .filter(l => l.trim())
@@ -211,6 +209,7 @@ window.SmartChecker = {
             return result;
         }
 
+        // ── ЭТАП 3: Ошибка выполнения ────────────────────────────────────
         if (runtimeError) {
             const errorLines = programOutput
                 .split('\n')
@@ -223,7 +222,7 @@ window.SmartChecker = {
             return result;
         }
 
-        // ── ЭТАП 3: Проверка вывода программы ───────────────────────────
+        // ── ЭТАП 4: Проверка вывода программы ───────────────────────────
         if (!this.outputMatches(programOutput, task.expected)) {
             const shown = programOutput || '(пустой вывод)';
             result.message = '✗ Программа скомпилировалась, но вывод неверный';
@@ -231,22 +230,19 @@ window.SmartChecker = {
             return result;
         }
 
-        // ── ЭТАП 4: Семантическая проверка кода (codeContains) ──────────
-        // Выполняется ТОЛЬКО после успешной компиляции и правильного вывода.
-        // Гарантирует, что нужные конструкции Java реально использованы в коде.
+        // ── ЭТАП 5: Проверка используемых конструкций (codeContains) ────
+        // Только после успешной компиляции и правильного вывода.
+        // Ключевые слова в комментариях и строках НЕ считаются.
         if (task.codeContains && task.codeContains.length > 0) {
             for (const pattern of task.codeContains) {
                 if (!this.containsPattern(allCode, pattern)) {
-                    // Генерируем читаемый вид паттерна для пользователя
                     const human = pattern
                         .replace(/\\\\/g, '')
                         .replace(/\\/g, '')
                         .trim();
 
-                    result.message = `✗ Вывод верный, но нужная конструкция не используется`;
-                    result.detail  = `Необходимо использовать: <code>${human}</code>\n`
-                                   + `Подсказка: убедитесь, что вы применяете нужный элемент языка, `
-                                   + `а не просто упоминаете его в комментарии.`;
+                    result.message = '✗ Вывод верный, но нужная конструкция не используется';
+                    result.detail  = `Необходимо использовать: <code>${human}</code>\nУбедитесь, что элемент языка применён в коде, а не упомянут в комментарии.`;
                     return result;
                 }
             }
